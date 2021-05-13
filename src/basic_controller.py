@@ -25,12 +25,12 @@ class Controller:
 		self.kp = 0
 		self.ki = 0
 		self.kd = 0
-		self.joint_setpoints = [0, 0.7, 0, 0.7, 0, 0.7,0] #index zero = joint1
-		self.joint_controls = [2, 2, 2, 2, 1, 0, 0] #0 effort control, 1 position control, 2 velocity control
-		self.x_filt = Averaging_filter(1000,1)
-		self.y_filt = Averaging_filter(1000,1)
-		self.z_filt = Averaging_filter(1000,1)
-		self.last_x = 0
+		self.joint_setpoints = [0, 0, 0, 0, 0, 0, 0] #index zero = joint1
+		self.joint_controls = [1, 1, 1, 1, 1, 1, 1] #0 effort control, 1 position control, 2 velocity control
+		self.rot_filt = Averaging_filter(50,1)
+		self.y_filt = Averaging_filter(50,0.5)
+		self.z_filt = Averaging_filter(50,0.5)
+		self.last_rot = 0
 		self.last_y = 0
 		self.last_z = 0
 		self.my_jac = jacobian(0.103,0.403,0.404,0.257) #link lengths
@@ -56,11 +56,11 @@ class Controller:
 		pos = msg.joint_positions
 		self.update_pos(pos)
 		#updating stick value
-		self.update_sticks(self.last_x,self.last_y,self.last_z)
+		#self.update_sticks(self.last_x,self.last_y,self.last_z)
 	
 		msg_cmd_effort = RigidBodyCmd()
-		msg_cmd_effort.joint_cmds = self.joint_setpoints	#[joints[0],joints[0],0,-joints[2],0,0,0]
-		msg_cmd_effort.joint_cmds_types = [1,1,1,1,1,1,1]#self.joint_controls
+		msg_cmd_effort.joint_cmds = self.joint_setpoints
+		msg_cmd_effort.joint_cmds_types = self.joint_controls
 		msg_cmd_effort.publish_children_names = True
 		msg_cmd_effort.publish_joint_names = True
 		msg_cmd_effort.publish_joint_positions = True
@@ -76,8 +76,8 @@ class Controller:
 
 	def update_pos(self,positions):
 		self.previous_pos = self.current_pos
-		self.current_pos = positions
-		print(self.current_pos)
+		self.current_pos = np.asarray(positions)
+		#print(self.current_pos)
 
 	def calc_effort(self):
 		pass
@@ -86,49 +86,60 @@ class Controller:
 		pass
 
 	def get_press(self,msg):
-		stick_valuex = msg.axes[3] #right left
+		stick_valuerot = msg.axes[1] #up down
 		stick_valuey = msg.axes[4] #up down
-		stick_valuez = msg.axes[1] #up down
+		stick_valuez = msg.axes[3] #right left
 		buttons = msg.buttons #LT 6, RT 7
 
+		#base case
+		self.joint_setpoints[1] = self.current_pos[1]
+		self.joint_setpoints[3] = self.current_pos[3]
+		#self.joint_setpoints[5] = self.current_pos[5]
+		#self.joint_setpoints[6] = self.current_pos[6]
+
+
 		if buttons[4] == 1:
-			self.joint_setpoints[6] = -0.5
+			self.joint_setpoints[6] += -0.15
 			print('Left Bumper')
 		elif buttons[5] == 1:
-			self.joint_setpoints[6] = 0.5
+			self.joint_setpoints[6] += 0.15
 			print('Right Bumper')
 		else:
-			self.joint_setpoints[6] = 0
+			self.joint_setpoints[6] += 0
 
-		if buttons[6] == 1:
-			self.joint_setpoints[5] = -0.5
+		if msg.axes[2] == -1:
+			self.joint_setpoints[5] += -0.15
 			print('Left Trigger')
-		elif buttons[7] == 1:
-			self.joint_setpoints[5] = 0.5
+		elif msg.axes[5] == -1:
+			self.joint_setpoints[5] += 0.15
 			print('Right Trigger')
 		else:
-			self.joint_setpoints[5] = 0
+			self.joint_setpoints[5] += 0
 			
 
 		if msg.axes[6] == 1:
 			self.control_mode = 1
+			self.joint_controls = [1, 1, 1, 1, 1, 1, 1]
 		elif msg.axes[6] == -1:
 			self.control_mode = 0
+			self.joint_controls = [1, 0, 1, 0, 1, 0, 2]
 		elif msg.axes[7] == 1: 
 			self.control_mode = 2
+			self.joint_controls = [1, 2, 1, 2, 1, 2, 2]
 		elif msg.axes[7] == -1:
-			self.joint_setpoints = aslist(self.current_pos)
+			self.update_sticks(stick_valuerot,stick_valuey,stick_valuez)
+			
 			return
 
-		self.update_sticks(stick_valuex,stick_valuey,stick_valuez)
 
 		
+		
 	def update_sticks(self,x,y,z):
-		xset = self.x_filt.filter(x)
-		if abs(xset) < 0.02:
-			xset = 0
-		self.joint_setpoints[0] = xset
-		self.last_x = xset
+		rotset = self.rot_filt.filter(x)
+		if abs(rotset) < 0.02:
+			rotset = 0
+		self.joint_setpoints[0] = rotset
+		self.last_rot = rotset
 
 		yset = self.y_filt.filter(y)
 		if abs(yset) < 0.02:
@@ -141,21 +152,29 @@ class Controller:
 			zset = 0
 		#self.joint_setpoints[0] = zset
 		self.last_z = zset
-
-		joints = self.my_invk.calc(0,0,zset)
-		#print(joints)
-		self.joint_setpoints[1] = joints[1]
-		self.joint_setpoints[3] = joints[2]
-		#self.joint_setpoints[0] = joints[0]
+		if self.control_mode == 1:
+			joints = self.my_invk.calc(0,yset,zset)
+			#limit joint 1 motion		
+			if(joints[1]) > 0.35:
+				joints[1] = 0.35
+			self.joint_setpoints[1] = joints[1]
+			self.joint_setpoints[3] = joints[2]
+			#self.joint_setpoints[0] = joints[0]
+		elif self.control_mode == 0:
+			vels = self.calc_joint_vel()
+			self.joint_setpoints[1] = vels[1]
+			self.joint_setpoints[3] = vels[3]
+			
 
 	def calc_stick_vector(self):
-		vector = [self.xlast,self.ylast,self.last_z]
-		return vector
+		vector = [self.last_rot,self.last_y,self.last_z, 0, 0, 0]
+		return np.array(vector).T
 
 	def calc_joint_vel(self):
 		vector = self.calc_stick_vector()
-		ijac = my_jac.inv_jacob_calc(q[1],q[2],q[3],q[4])
+		ijac = self.my_jac.inv_jacob_calc(self.current_pos[1],self.current_pos[2],self.current_pos[3],self.current_pos[4])
 		qvs = np.matmul(ijac,vector);
+		return qvs
 
 		
 	def initialize(self):
